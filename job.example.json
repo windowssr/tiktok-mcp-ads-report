@@ -1,0 +1,33 @@
+{
+  "all_advertisers": true,
+  "arguments": {
+    "report_type": "BASIC",
+    "data_level": "AUCTION_CAMPAIGN",
+    "dimensions": ["campaign_id"],
+    "metrics": [
+      "campaign_name",
+      "spend",
+      "impressions",
+      "clicks",
+      "ctr",
+      "cpc",
+      "cpm",
+      "conversion",
+      "cost_per_conversion",
+      "conversion_rate",
+      "complete_payment_roas",
+      "value_per_complete_payment",
+      "total_complete_payment_rate",
+      "total_purchase_value",
+      "total_active_pay_roas"
+    ],
+    "start_date": "${week_ago}",
+    "end_date": "${today}",
+    "page_size": 1000,
+    "order_field": "spend",
+    "order_type": "DESC"
+  },
+  "interval_seconds": 1800,
+  "output_dir": "data",
+  "formats": ["json", "csv"]
+}

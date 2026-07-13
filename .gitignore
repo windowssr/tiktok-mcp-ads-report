@@ -1,0 +1,9 @@
+.venv*/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+data/
+tools.json
+job.json
+arguments.roas.test.json
+.env
