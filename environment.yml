@@ -1,0 +1,11 @@
+name: tiktok-mcp
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  # 业务依赖通过 pip editable 安装（见 README / scripts/setup-conda.ps1）
+  # 创建环境后执行:
+  #   conda activate tiktok-mcp
+  #   pip install -e ".[dev]"

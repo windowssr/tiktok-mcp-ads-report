@@ -25,6 +25,14 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from pydantic import AnyUrl
 
+from tiktok_mcp_client.report import (
+    build_summary,
+    default_output_stem,
+    filter_rows_with_activity,
+    resolve_date_preset,
+    write_excel,
+)
+
 
 DEFAULT_SERVER_URL = (
     "https://business-api.tiktok.com/open_mcp/tt-ads-mcp-layer"
@@ -301,10 +309,14 @@ DEFAULT_ROAS_METRICS = [
 
 def render_dynamic_values(value: Any, now: datetime | None = None) -> Any:
     now = now or datetime.now()
+    today = now.date()
     replacements = {
-        "${today}": now.date().isoformat(),
-        "${yesterday}": (now.date() - timedelta(days=1)).isoformat(),
-        "${week_ago}": (now.date() - timedelta(days=7)).isoformat(),
+        "${today}": today.isoformat(),
+        "${yesterday}": (today - timedelta(days=1)).isoformat(),
+        "${week_ago}": (today - timedelta(days=7)).isoformat(),
+        "${days_ago_14}": (today - timedelta(days=14)).isoformat(),
+        "${days_ago_30}": (today - timedelta(days=30)).isoformat(),
+        "${month_start}": today.replace(day=1).isoformat(),
         "${now}": now.isoformat(timespec="seconds"),
     }
     if isinstance(value, str):
@@ -373,13 +385,21 @@ def save_rows(
     formats: list[str],
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_label = "".join(
         character if character.isalnum() or character in "-_" else "_"
         for character in label
     )
-    base = output_dir / f"{timestamp}_{safe_label}"
+    if safe_label[:8].isdigit() and "_" in safe_label:
+        base = output_dir / safe_label
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = output_dir / f"{timestamp}_{safe_label}"
     written: list[Path] = []
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        summary = build_summary(rows)
+        payload = {**payload, "summary": summary}
 
     if "json" in formats:
         path = base.with_suffix(".json")
@@ -399,6 +419,24 @@ def save_rows(
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(flat_rows)
+        written.append(path)
+
+    if "xlsx" in formats or "excel" in formats:
+        path = write_excel(
+            base.with_suffix(".xlsx"),
+            detail_rows=rows,
+            summary=summary,
+            account_summaries=payload.get("account_summaries") or [],
+            errors=payload.get("errors") or [],
+            meta={
+                "fetched_at": payload.get("fetched_at"),
+                "advertiser_count": payload.get("advertiser_count"),
+                "row_count": payload.get("row_count"),
+                "error_count": payload.get("error_count"),
+                "label": safe_label,
+            },
+            flatten_row=flatten_dict,
+        )
         written.append(path)
 
     return written
@@ -562,12 +600,39 @@ async def fetch_report_pages(
 async def fetch_all_advertiser_reports(
     client: TikTokMcpClient,
     report_arguments: dict[str, Any],
+    *,
+    advertiser_ids: list[str] | None = None,
+    advertiser_keyword: str | None = None,
+    only_active_rows: bool = False,
+    only_spend_rows: bool = False,
+    max_retries: int = 2,
 ) -> dict[str, Any]:
     async with client.session() as session:
         advertisers_result = result_to_dict(
             await session.call_tool("auth_advertiser_get", arguments={})
         )
         advertisers = parse_advertisers(advertisers_result)
+
+        if advertiser_ids:
+            wanted = {item.strip() for item in advertiser_ids if item.strip()}
+            advertisers = [
+                item
+                for item in advertisers
+                if item["advertiser_id"] in wanted
+            ]
+        if advertiser_keyword:
+            keyword = advertiser_keyword.lower()
+            advertisers = [
+                item
+                for item in advertisers
+                if keyword
+                in (
+                    item["advertiser_id"]
+                    + " "
+                    + item["advertiser_name"]
+                ).lower()
+            ]
+
         all_rows: list[dict[str, Any]] = []
         account_summaries: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
@@ -585,37 +650,67 @@ async def fetch_all_advertiser_reports(
                 "advertiser_id": advertiser_id,
             }
             arguments.pop("advertiser_ids", None)
-            try:
-                rows, pages = await fetch_report_pages(session, arguments)
-                if pages and pages[-1].get("isError"):
+
+            last_error: Any = None
+            for attempt in range(1, max_retries + 2):
+                try:
+                    rows, pages = await fetch_report_pages(session, arguments)
+                    if pages and pages[-1].get("isError"):
+                        last_error = pages[-1]
+                        if attempt <= max_retries:
+                            print(
+                                f"  重试 {attempt}/{max_retries} ...",
+                                flush=True,
+                            )
+                            await asyncio.sleep(1.5 * attempt)
+                            continue
+                        errors.append(
+                            {
+                                "advertiser_id": advertiser_id,
+                                "advertiser_name": advertiser_name,
+                                "error": last_error,
+                            }
+                        )
+                        break
+
+                    enriched = attach_advertiser(
+                        rows, advertiser_id, advertiser_name
+                    )
+                    if only_spend_rows:
+                        enriched = filter_rows_with_activity(
+                            enriched, only_spend=True
+                        )
+                    elif only_active_rows:
+                        enriched = filter_rows_with_activity(enriched)
+
+                    all_rows.extend(enriched)
+                    account_summaries.append(
+                        {
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "row_count": len(enriched),
+                        }
+                    )
+                    last_error = None
+                    break
+                except Exception as error:
+                    last_error = str(error)
+                    if attempt <= max_retries:
+                        print(
+                            f"  异常重试 {attempt}/{max_retries}: {error}",
+                            flush=True,
+                        )
+                        await asyncio.sleep(1.5 * attempt)
+                        continue
                     errors.append(
                         {
                             "advertiser_id": advertiser_id,
                             "advertiser_name": advertiser_name,
-                            "error": pages[-1],
+                            "error": last_error,
                         }
                     )
-                    continue
-                enriched = attach_advertiser(
-                    rows, advertiser_id, advertiser_name
-                )
-                all_rows.extend(enriched)
-                account_summaries.append(
-                    {
-                        "advertiser_id": advertiser_id,
-                        "advertiser_name": advertiser_name,
-                        "row_count": len(enriched),
-                    }
-                )
-            except Exception as error:
-                errors.append(
-                    {
-                        "advertiser_id": advertiser_id,
-                        "advertiser_name": advertiser_name,
-                        "error": str(error),
-                    }
-                )
 
+    summary = build_summary(all_rows)
     return {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "advertiser_count": len(advertisers),
@@ -624,6 +719,7 @@ async def fetch_all_advertiser_reports(
         "account_summaries": account_summaries,
         "errors": errors,
         "report_arguments": report_arguments,
+        "summary": summary,
         "rows": all_rows,
     }
 
@@ -650,37 +746,85 @@ async def command_report_all(args: argparse.Namespace) -> int:
         report_arguments = render_dynamic_values(
             parse_json_argument(args.args)
         )
+        preset = "custom_args"
+        query_lifetime = bool(report_arguments.get("query_lifetime"))
+        start_date = report_arguments.get("start_date")
+        end_date = report_arguments.get("end_date")
     else:
-        report_arguments = render_dynamic_values(
-            {
-                "report_type": "BASIC",
-                "data_level": args.data_level,
-                "dimensions": ["campaign_id"],
-                "metrics": DEFAULT_ROAS_METRICS,
-                "start_date": args.start_date,
-                "end_date": args.end_date,
-                "page_size": 1000,
-                "order_field": "spend",
-                "order_type": "DESC",
-            }
+        if args.lifetime:
+            preset = "lifetime"
+        elif args.start_date and args.end_date:
+            preset = "custom"
+        else:
+            preset = args.preset
+
+        start_token, end_token, query_lifetime = resolve_date_preset(
+            preset,
+            start_date=args.start_date,
+            end_date=args.end_date,
         )
+        report_arguments = {
+            "report_type": "BASIC",
+            "data_level": args.data_level,
+            "dimensions": ["campaign_id"],
+            "metrics": DEFAULT_ROAS_METRICS,
+            "page_size": 1000,
+            "order_field": "spend",
+            "order_type": "DESC",
+        }
+        if query_lifetime:
+            report_arguments["query_lifetime"] = True
+            start_date = None
+            end_date = None
+        else:
+            report_arguments["start_date"] = start_token or "${week_ago}"
+            report_arguments["end_date"] = end_token or "${today}"
+            report_arguments = render_dynamic_values(report_arguments)
+            start_date = report_arguments.get("start_date")
+            end_date = report_arguments.get("end_date")
+
+    advertiser_ids = None
+    if args.advertiser_id:
+        advertiser_ids = [
+            item.strip()
+            for item in args.advertiser_id.split(",")
+            if item.strip()
+        ]
 
     payload = await fetch_all_advertiser_reports(
-        build_client(args), report_arguments
+        build_client(args),
+        report_arguments,
+        advertiser_ids=advertiser_ids,
+        advertiser_keyword=args.advertiser_keyword,
+        only_active_rows=args.only_active,
+        only_spend_rows=args.only_spend,
+        max_retries=args.retries,
+    )
+    label = default_output_stem(
+        preset=preset,
+        start_date=str(start_date) if start_date else None,
+        end_date=str(end_date) if end_date else None,
+        query_lifetime=query_lifetime or bool(
+            report_arguments.get("query_lifetime")
+        ),
     )
     paths = save_rows(
         Path(args.output_dir),
-        "all_advertisers_report",
+        label,
         payload,
         payload["rows"],
         args.format,
     )
+    totals = (payload.get("summary") or {}).get("totals") or {}
     print(
         json.dumps(
             {
                 "advertiser_count": payload["advertiser_count"],
                 "row_count": payload["row_count"],
                 "error_count": payload["error_count"],
+                "spend": totals.get("spend"),
+                "clicks": totals.get("clicks"),
+                "conversions": totals.get("conversion"),
                 "outputs": [str(path) for path in paths],
             },
             ensure_ascii=False,
@@ -831,7 +975,7 @@ def create_parser() -> argparse.ArgumentParser:
     call_parser.add_argument(
         "--format",
         action="append",
-        choices=["json", "csv"],
+        choices=["json", "csv", "xlsx", "excel"],
         default=None,
         help="输出格式，可重复传入",
     )
@@ -839,22 +983,35 @@ def create_parser() -> argparse.ArgumentParser:
 
     report_all_parser = subparsers.add_parser(
         "report-all",
-        help="拉取全部授权广告账户的投流报表（含 ROAS）",
+        help="拉取全部/筛选广告账户的投流报表（支持时间范围/全量/Excel）",
     )
     add_connection_options(report_all_parser)
     report_all_parser.add_argument(
         "--args",
-        help='自定义报表参数 JSON，或使用 @文件路径',
+        help="自定义报表参数 JSON，或使用 @文件路径",
+    )
+    report_all_parser.add_argument(
+        "--preset",
+        default="last_7_days",
+        help=(
+            "时间预设: today/yesterday/last_7_days/last_14_days/"
+            "last_30_days/this_month/lifetime/custom"
+        ),
     )
     report_all_parser.add_argument(
         "--start-date",
-        default="${week_ago}",
-        help="默认开始日期，支持 ${week_ago}/${yesterday}/${today}",
+        default=None,
+        help="开始日期 YYYY-MM-DD；preset=custom 时必填，也可写 ${week_ago}",
     )
     report_all_parser.add_argument(
         "--end-date",
-        default="${today}",
-        help="默认结束日期，支持 ${yesterday}/${today}",
+        default=None,
+        help="结束日期 YYYY-MM-DD；preset=custom 时必填",
+    )
+    report_all_parser.add_argument(
+        "--lifetime",
+        action="store_true",
+        help="拉取 lifetime 指标（query_lifetime=true）",
     )
     report_all_parser.add_argument(
         "--data-level",
@@ -867,6 +1024,30 @@ def create_parser() -> argparse.ArgumentParser:
         ],
     )
     report_all_parser.add_argument(
+        "--advertiser-id",
+        help="只拉指定账户，多个用逗号分隔",
+    )
+    report_all_parser.add_argument(
+        "--advertiser-keyword",
+        help="按账户名/ID 关键字过滤",
+    )
+    report_all_parser.add_argument(
+        "--only-active",
+        action="store_true",
+        help="只保留有曝光/点击/消耗/转化的行",
+    )
+    report_all_parser.add_argument(
+        "--only-spend",
+        action="store_true",
+        help="只保留有消耗的行",
+    )
+    report_all_parser.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="单账户失败重试次数",
+    )
+    report_all_parser.add_argument(
         "--output-dir",
         default="data",
         help="保存目录",
@@ -874,9 +1055,9 @@ def create_parser() -> argparse.ArgumentParser:
     report_all_parser.add_argument(
         "--format",
         action="append",
-        choices=["json", "csv"],
+        choices=["json", "csv", "xlsx", "excel"],
         default=None,
-        help="输出格式，可重复传入",
+        help="输出格式，可重复传入；默认 json,csv,xlsx",
     )
     report_all_parser.set_defaults(handler=command_report_all)
 
@@ -900,7 +1081,10 @@ def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
     if getattr(args, "format", None) is None:
-        args.format = ["json"]
+        if getattr(args, "command", None) == "report-all":
+            args.format = ["json", "csv", "xlsx"]
+        else:
+            args.format = ["json"]
     try:
         exit_code = asyncio.run(args.handler(args))
     except KeyboardInterrupt:

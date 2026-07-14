@@ -12,6 +12,7 @@ dependencies = [
     "httpx",
     "mcp",
     "pydantic",
+    "openpyxl",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +20,7 @@ dev = ["pytest"]
 
 [project.scripts]
 tiktok-mcp-client = "tiktok_mcp_client.cli:main"
+tiktok-mcp-fetch = "tiktok_mcp_client.menu:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tiktok_mcp_client"]

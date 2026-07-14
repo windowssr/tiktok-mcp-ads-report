@@ -58,7 +58,7 @@ TikTok Marketing API / 广告账户数据
 | 项 | 说明 |
 |----|------|
 | 系统 | Windows 10/11（已实测） |
-| Python | 3.11+ |
+| Python | 3.11+（推荐 **conda** 环境） |
 | 网络 | 国内必须开 HTTP 代理（如 Clash `7890`） |
 | 账号 | 能登录 TikTok for Business，且 Business Center 已分配广告账户权限 |
 
@@ -72,28 +72,90 @@ https://business-api.tiktok.com/open_mcp/tt-ads-mcp-layer
 
 ## 四、安装
 
+推荐使用 **conda**（Miniconda / Anaconda）。项目根目录已提供 `environment.yml` 与一键脚本。
+
+### 方式 A：Conda（推荐）
+
 在项目根目录打开 PowerShell：
 
 ```powershell
 cd <本仓库路径>
 
-# 建议把虚拟环境建在用户目录，避免某些磁盘权限拦截 .exe/.pyd
+# 一键创建环境并安装（默认环境名 tiktok-mcp）
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-conda.ps1
+```
+
+手动等价步骤：
+
+```powershell
+cd <本仓库路径>
+conda env create -f environment.yml
+conda activate tiktok-mcp
+python -m pip install -U pip
+python -m pip install -e ".[dev]"
+```
+
+若环境已存在，只需激活后重装依赖：
+
+```powershell
+conda activate tiktok-mcp
+python -m pip install -e ".[dev]"
+```
+
+激活后可直接用：
+
+```powershell
+conda activate tiktok-mcp
+tiktok-mcp-client --help
+tiktok-mcp-fetch          # 交互式采集菜单
+python fetch_ads.py       # 同上
+```
+
+不想 activate 时：
+
+```powershell
+conda run -n tiktok-mcp tiktok-mcp-client --help
+conda run -n tiktok-mcp python fetch_ads.py
+```
+
+后面文档里的 `$TK` 在 conda 下可写成：
+
+```powershell
+# 已 activate 时
+$TK = "tiktok-mcp-client"
+
+# 或未 activate
+$TK = "conda run -n tiktok-mcp tiktok-mcp-client"
+```
+
+**推荐入口（交互菜单）**：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_fetch.ps1
+```
+
+非交互一键拉近 7 天并导出 Excel：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_fetch.ps1 -Once last_7_days
+```
+
+重建环境（干净重装）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-conda.ps1 -Force
+```
+
+### 方式 B：venv（备选）
+
+若不用 conda，也可建普通虚拟环境（建议建在用户目录，避免部分磁盘权限拦截 `.exe/.pyd`）：
+
+```powershell
+cd <本仓库路径>
 python -m venv "$env:USERPROFILE\.venvs\tiktok-official-mcp" --copies
 & "$env:USERPROFILE\.venvs\tiktok-official-mcp\Scripts\python.exe" -m pip install -U pip
 & "$env:USERPROFILE\.venvs\tiktok-official-mcp\Scripts\python.exe" -m pip install -e .
-```
-
-后面命令统一写成（可先设别名）：
-
-```powershell
 $TK = "$env:USERPROFILE\.venvs\tiktok-official-mcp\Scripts\tiktok-mcp-client.exe"
-```
-
-若可激活虚拟环境：
-
-```powershell
-& "$env:USERPROFILE\.venvs\tiktok-official-mcp\Scripts\Activate.ps1"
-# 之后可直接用 tiktok-mcp-client
 ```
 
 ---
@@ -131,7 +193,41 @@ $TK = "$env:USERPROFILE\.venvs\tiktok-official-mcp\Scripts\tiktok-mcp-client.exe
 
 应返回 `data.list` 里多个 `advertiser_id`。若是空数组 `[]`，说明当前登录账号没有广告账户权限，需换有权限的账号重新授权。
 
-### 4. 一键拉全量投流数据（含 ROAS）
+### 4. 推荐：交互菜单采集（按时间 / 全量 / Excel）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_fetch.ps1
+# 或
+conda activate tiktok-mcp
+python fetch_ads.py --proxy http://127.0.0.1:7890
+```
+
+菜单能力：
+
+- 按时间拉取：今天 / 昨天 / 近7/14/30天 / 本月 / 自定义日期
+- 全量 lifetime 拉取
+- 按账户关键字或指定账户 ID
+- 选择粒度：计划 / 广告组 / 广告 / 账户
+- 导出 **Excel / CSV / JSON**（Excel 含：总览、明细、账户汇总、错误）
+- 只保留有消耗的行、失败自动重试、打开输出目录、改代理、重新授权
+
+命令行等价示例：
+
+```powershell
+# 近 7 天，全账户，导出 xlsx+csv+json
+& $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --only-spend --format xlsx --format csv --format json
+
+# 自定义日期
+& $TK report-all --proxy http://127.0.0.1:7890 --start-date 2026-07-01 --end-date 2026-07-13 --format xlsx
+
+# lifetime 全量
+& $TK report-all --proxy http://127.0.0.1:7890 --lifetime --format xlsx
+
+# 只拉某个账户
+& $TK report-all --proxy http://127.0.0.1:7890 --preset yesterday --advertiser-keyword 何祥伟 --format xlsx
+```
+
+### 5. 也可用参数模板拉取
 
 项目已提供参数模板 `arguments.report.example.json`（近 7 天、计划级、含 ROAS 字段）。
 
@@ -140,15 +236,17 @@ $TK = "$env:USERPROFILE\.venvs\tiktok-official-mcp\Scripts\tiktok-mcp-client.exe
   --proxy http://127.0.0.1:7890 `
   --args "@arguments.report.example.json" `
   --output-dir data `
-  --format json `
-  --format csv
+  --format xlsx `
+  --format csv `
+  --format json
 ```
 
 输出示例：
 
 ```text
-data/YYYYMMDD_HHMMSS_all_advertisers_report.json
-data/YYYYMMDD_HHMMSS_all_advertisers_report.csv
+data/YYYYMMDD_HHMMSS_report_last_7_days_....xlsx
+data/YYYYMMDD_HHMMSS_report_last_7_days_....csv
+data/YYYYMMDD_HHMMSS_report_last_7_days_....json
 ```
 
 CSV 每一行是一条计划数据，并带上 `advertiser_id` / `advertiser_name`。
