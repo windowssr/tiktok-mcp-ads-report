@@ -288,8 +288,14 @@ def result_to_dict(result: Any) -> dict[str, Any]:
     return raw
 
 
-DEFAULT_ROAS_METRICS = [
-    "campaign_name",
+DATA_LEVEL_DIMENSIONS: dict[str, list[str]] = {
+    "AUCTION_CAMPAIGN": ["campaign_id"],
+    "AUCTION_ADGROUP": ["adgroup_id"],
+    "AUCTION_AD": ["ad_id"],
+    "AUCTION_ADVERTISER": ["advertiser_id"],
+}
+
+CORE_PERF_METRICS = [
     "spend",
     "impressions",
     "clicks",
@@ -305,6 +311,124 @@ DEFAULT_ROAS_METRICS = [
     "total_purchase_value",
     "total_active_pay_roas",
 ]
+
+VIDEO_PERF_METRICS = [
+    "video_play_actions",
+    "video_watched_2s",
+    "video_watched_6s",
+    "average_video_play",
+    "video_views_p25",
+    "video_views_p50",
+    "video_views_p75",
+    "video_views_p100",
+]
+
+DEFAULT_ROAS_METRICS = ["campaign_name", *CORE_PERF_METRICS]
+
+DEFAULT_ADGROUP_METRICS = [
+    "adgroup_name",
+    "campaign_name",
+    *CORE_PERF_METRICS,
+]
+
+DEFAULT_AD_METRICS = [
+    "ad_name",
+    "adgroup_name",
+    "campaign_name",
+    *CORE_PERF_METRICS,
+    *VIDEO_PERF_METRICS,
+]
+
+CREATIVE_INFO_FIELDS = [
+    "material_id",
+    "material_name",
+    "video_id",
+    "image_id",
+    "video_material_source",
+    "identity",
+    "placement",
+    "country_code",
+    "currency",
+    "create_time",
+    "tiktok_item_ids",
+]
+
+CREATIVE_METRICS_FIELDS = [
+    "spend",
+    "impressions",
+    "clicks",
+    "ctr",
+    "cpc",
+    "cpm",
+    "conversion",
+    "cost_per_conversion",
+    *VIDEO_PERF_METRICS,
+]
+
+
+def dimensions_for_data_level(data_level: str) -> list[str]:
+    return list(
+        DATA_LEVEL_DIMENSIONS.get(data_level, ["campaign_id"])
+    )
+
+
+def metrics_for_data_level(data_level: str) -> list[str]:
+    if data_level == "AUCTION_AD":
+        return list(DEFAULT_AD_METRICS)
+    if data_level == "AUCTION_ADGROUP":
+        return list(DEFAULT_ADGROUP_METRICS)
+    if data_level == "AUCTION_ADVERTISER":
+        return list(CORE_PERF_METRICS)
+    return list(DEFAULT_ROAS_METRICS)
+
+
+def build_basic_report_arguments(
+    *,
+    data_level: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    query_lifetime: bool = False,
+) -> dict[str, Any]:
+    arguments: dict[str, Any] = {
+        "report_type": "BASIC",
+        "data_level": data_level,
+        "dimensions": dimensions_for_data_level(data_level),
+        "metrics": metrics_for_data_level(data_level),
+        "page_size": 1000,
+        "order_field": "spend",
+        "order_type": "DESC",
+    }
+    if query_lifetime:
+        arguments["query_lifetime"] = True
+    else:
+        arguments["start_date"] = start_date or "${week_ago}"
+        arguments["end_date"] = end_date or "${today}"
+    return arguments
+
+
+def build_creative_report_params(
+    *,
+    material_type: str = "VIDEO",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    query_lifetime: bool = False,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "report_type": "VIDEO_INSIGHT",
+        "material_type": material_type,
+        "page_size": 1000,
+        "sort_field": "spend",
+        "sort_type": "DESC",
+        "info_fields": list(CREATIVE_INFO_FIELDS),
+        "metrics_fields": list(CREATIVE_METRICS_FIELDS),
+    }
+    if query_lifetime:
+        params["lifetime"] = True
+    else:
+        params["start_date"] = start_date or "${week_ago}"
+        params["end_date"] = end_date or "${today}"
+        params["lifetime"] = False
+    return params
 
 
 def render_dynamic_values(value: Any, now: datetime | None = None) -> Any:
@@ -585,10 +709,114 @@ async def fetch_report_pages(
         page_rows = extract_rows(result)
         rows.extend(page_rows)
 
-        page_info = (
-            (result.get("parsed") or {}).get("data", {}).get("page_info")
-            or {}
+        page_info = extract_page_info(result)
+        total_page = int(page_info.get("total_page") or 1)
+        if page >= total_page or not page_rows:
+            break
+        page += 1
+
+    return rows, pages
+
+
+def filter_advertisers(
+    advertisers: list[dict[str, str]],
+    *,
+    advertiser_ids: list[str] | None = None,
+    advertiser_keyword: str | None = None,
+) -> list[dict[str, str]]:
+    filtered = advertisers
+    if advertiser_ids:
+        wanted = {item.strip() for item in advertiser_ids if item.strip()}
+        filtered = [
+            item for item in filtered if item["advertiser_id"] in wanted
+        ]
+    if advertiser_keyword:
+        keyword = advertiser_keyword.lower()
+        filtered = [
+            item
+            for item in filtered
+            if keyword
+            in (item["advertiser_id"] + " " + item["advertiser_name"]).lower()
+        ]
+    return filtered
+
+
+def extract_page_info(result: dict[str, Any]) -> dict[str, Any]:
+    parsed = result.get("parsed")
+    if isinstance(parsed, dict):
+        data = parsed.get("data")
+        if isinstance(data, dict) and isinstance(data.get("page_info"), dict):
+            return data["page_info"]
+        if isinstance(parsed.get("page_info"), dict):
+            return parsed["page_info"]
+    return (
+        (result.get("parsed") or {}).get("data", {}).get("page_info")
+        or {}
+    )
+
+
+def normalize_creative_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        info = row.get("info") if isinstance(row.get("info"), dict) else {}
+        metrics = (
+            row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
         )
+        if info or metrics:
+            normalized.append(
+                {
+                    "info": info,
+                    "metrics": metrics,
+                    **{
+                        key: value
+                        for key, value in row.items()
+                        if key not in {"info", "metrics"}
+                    },
+                }
+            )
+        else:
+            normalized.append(row)
+    return normalized
+
+
+async def fetch_creative_report_pages(
+    session: ClientSession,
+    base_params: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    page = int(base_params.get("page") or 1)
+    page_size = int(base_params.get("page_size") or 1000)
+    rows: list[dict[str, Any]] = []
+    pages: list[dict[str, Any]] = []
+
+    while True:
+        params = {
+            **base_params,
+            "page": page,
+            "page_size": page_size,
+        }
+        result = result_to_dict(
+            await session.call_tool(
+                "tool_execute",
+                arguments={
+                    "tool_name": "creative_report_get",
+                    "params": params,
+                },
+            )
+        )
+        pages.append(result)
+        if result.get("isError"):
+            break
+
+        parsed = result.get("parsed")
+        if isinstance(parsed, dict) and parsed.get("code") not in (0, None):
+            break
+
+        page_rows = normalize_creative_rows(extract_rows(result))
+        rows.extend(page_rows)
+
+        page_info = extract_page_info(result)
         total_page = int(page_info.get("total_page") or 1)
         if page >= total_page or not page_rows:
             break
@@ -611,27 +839,11 @@ async def fetch_all_advertiser_reports(
         advertisers_result = result_to_dict(
             await session.call_tool("auth_advertiser_get", arguments={})
         )
-        advertisers = parse_advertisers(advertisers_result)
-
-        if advertiser_ids:
-            wanted = {item.strip() for item in advertiser_ids if item.strip()}
-            advertisers = [
-                item
-                for item in advertisers
-                if item["advertiser_id"] in wanted
-            ]
-        if advertiser_keyword:
-            keyword = advertiser_keyword.lower()
-            advertisers = [
-                item
-                for item in advertisers
-                if keyword
-                in (
-                    item["advertiser_id"]
-                    + " "
-                    + item["advertiser_name"]
-                ).lower()
-            ]
+        advertisers = filter_advertisers(
+            parse_advertisers(advertisers_result),
+            advertiser_ids=advertiser_ids,
+            advertiser_keyword=advertiser_keyword,
+        )
 
         all_rows: list[dict[str, Any]] = []
         account_summaries: list[dict[str, Any]] = []
@@ -724,6 +936,146 @@ async def fetch_all_advertiser_reports(
     }
 
 
+async def fetch_all_advertiser_creative_reports(
+    client: TikTokMcpClient,
+    creative_params: dict[str, Any],
+    *,
+    material_types: list[str] | None = None,
+    advertiser_ids: list[str] | None = None,
+    advertiser_keyword: str | None = None,
+    only_active_rows: bool = False,
+    only_spend_rows: bool = False,
+    max_retries: int = 2,
+) -> dict[str, Any]:
+    types = material_types or ["VIDEO"]
+    async with client.session() as session:
+        advertisers_result = result_to_dict(
+            await session.call_tool("auth_advertiser_get", arguments={})
+        )
+        advertisers = filter_advertisers(
+            parse_advertisers(advertisers_result),
+            advertiser_ids=advertiser_ids,
+            advertiser_keyword=advertiser_keyword,
+        )
+
+        all_rows: list[dict[str, Any]] = []
+        account_summaries: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        for index, advertiser in enumerate(advertisers, start=1):
+            advertiser_id = advertiser["advertiser_id"]
+            advertiser_name = advertiser["advertiser_name"]
+            print(
+                f"[{index}/{len(advertisers)}] "
+                f"{advertiser_name or advertiser_id} ...",
+                flush=True,
+            )
+            account_rows: list[dict[str, Any]] = []
+            failed = False
+            for material_type in types:
+                params = {
+                    **creative_params,
+                    "advertiser_id": advertiser_id,
+                    "material_type": material_type,
+                }
+                last_error: Any = None
+                for attempt in range(1, max_retries + 2):
+                    try:
+                        rows, pages = await fetch_creative_report_pages(
+                            session, params
+                        )
+                        last_page = pages[-1] if pages else {}
+                        parsed = last_page.get("parsed")
+                        api_error = (
+                            isinstance(parsed, dict)
+                            and parsed.get("code") not in (0, None)
+                        )
+                        if last_page.get("isError") or api_error:
+                            last_error = last_page
+                            if attempt <= max_retries:
+                                print(
+                                    f"  {material_type} 重试 "
+                                    f"{attempt}/{max_retries} ...",
+                                    flush=True,
+                                )
+                                await asyncio.sleep(1.5 * attempt)
+                                continue
+                            errors.append(
+                                {
+                                    "advertiser_id": advertiser_id,
+                                    "advertiser_name": advertiser_name,
+                                    "material_type": material_type,
+                                    "error": last_error,
+                                }
+                            )
+                            failed = True
+                            break
+
+                        enriched = attach_advertiser(
+                            rows, advertiser_id, advertiser_name
+                        )
+                        for row in enriched:
+                            row["material_type"] = material_type
+                        account_rows.extend(enriched)
+                        last_error = None
+                        break
+                    except Exception as error:
+                        last_error = str(error)
+                        if attempt <= max_retries:
+                            print(
+                                f"  {material_type} 异常重试 "
+                                f"{attempt}/{max_retries}: {error}",
+                                flush=True,
+                            )
+                            await asyncio.sleep(1.5 * attempt)
+                            continue
+                        errors.append(
+                            {
+                                "advertiser_id": advertiser_id,
+                                "advertiser_name": advertiser_name,
+                                "material_type": material_type,
+                                "error": last_error,
+                            }
+                        )
+                        failed = True
+                        break
+                if failed:
+                    break
+
+            if only_spend_rows:
+                account_rows = filter_rows_with_activity(
+                    account_rows, only_spend=True
+                )
+            elif only_active_rows:
+                account_rows = filter_rows_with_activity(account_rows)
+
+            all_rows.extend(account_rows)
+            account_summaries.append(
+                {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    "row_count": len(account_rows),
+                }
+            )
+
+    summary = build_summary(all_rows)
+    return {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "advertiser_count": len(advertisers),
+        "row_count": len(all_rows),
+        "error_count": len(errors),
+        "account_summaries": account_summaries,
+        "errors": errors,
+        "report_arguments": {
+            "mode": "creative_material",
+            "material_types": types,
+            **creative_params,
+        },
+        "summary": summary,
+        "rows": all_rows,
+    }
+
+
 async def command_call(args: argparse.Namespace) -> int:
     arguments = render_dynamic_values(parse_json_argument(args.args))
     result = await call_once(build_client(args), args.tool, arguments)
@@ -742,14 +1094,68 @@ async def command_call(args: argparse.Namespace) -> int:
 
 
 async def command_report_all(args: argparse.Namespace) -> int:
+    mode = getattr(args, "mode", "basic") or "basic"
     if args.args:
-        report_arguments = render_dynamic_values(
+        custom_arguments = render_dynamic_values(
             parse_json_argument(args.args)
         )
         preset = "custom_args"
-        query_lifetime = bool(report_arguments.get("query_lifetime"))
-        start_date = report_arguments.get("start_date")
-        end_date = report_arguments.get("end_date")
+        if mode == "material" or custom_arguments.get("mode") == "creative_material":
+            mode = "material"
+            creative_params = {
+                key: value
+                for key, value in custom_arguments.items()
+                if key not in {"mode", "material_types"}
+            }
+            material_types = custom_arguments.get("material_types") or [
+                getattr(args, "material_type", "VIDEO") or "VIDEO"
+            ]
+            if isinstance(material_types, str):
+                material_types = [material_types]
+            query_lifetime = bool(
+                creative_params.get("lifetime")
+                or creative_params.get("query_lifetime")
+            )
+            start_date = creative_params.get("start_date")
+            end_date = creative_params.get("end_date")
+            payload = await fetch_all_advertiser_creative_reports(
+                build_client(args),
+                creative_params,
+                material_types=list(material_types),
+                advertiser_ids=(
+                    [
+                        item.strip()
+                        for item in (args.advertiser_id or "").split(",")
+                        if item.strip()
+                    ]
+                    or None
+                ),
+                advertiser_keyword=args.advertiser_keyword,
+                only_active_rows=args.only_active,
+                only_spend_rows=args.only_spend,
+                max_retries=args.retries,
+            )
+        else:
+            report_arguments = custom_arguments
+            query_lifetime = bool(report_arguments.get("query_lifetime"))
+            start_date = report_arguments.get("start_date")
+            end_date = report_arguments.get("end_date")
+            payload = await fetch_all_advertiser_reports(
+                build_client(args),
+                report_arguments,
+                advertiser_ids=(
+                    [
+                        item.strip()
+                        for item in (args.advertiser_id or "").split(",")
+                        if item.strip()
+                    ]
+                    or None
+                ),
+                advertiser_keyword=args.advertiser_keyword,
+                only_active_rows=args.only_active,
+                only_spend_rows=args.only_spend,
+                max_retries=args.retries,
+            )
     else:
         if args.lifetime:
             preset = "lifetime"
@@ -763,51 +1169,76 @@ async def command_report_all(args: argparse.Namespace) -> int:
             start_date=args.start_date,
             end_date=args.end_date,
         )
-        report_arguments = {
-            "report_type": "BASIC",
-            "data_level": args.data_level,
-            "dimensions": ["campaign_id"],
-            "metrics": DEFAULT_ROAS_METRICS,
-            "page_size": 1000,
-            "order_field": "spend",
-            "order_type": "DESC",
-        }
-        if query_lifetime:
-            report_arguments["query_lifetime"] = True
-            start_date = None
-            end_date = None
+        advertiser_ids = None
+        if args.advertiser_id:
+            advertiser_ids = [
+                item.strip()
+                for item in args.advertiser_id.split(",")
+                if item.strip()
+            ]
+
+        if mode == "material":
+            creative_params = build_creative_report_params(
+                material_type=getattr(args, "material_type", "VIDEO")
+                or "VIDEO",
+                start_date=start_token,
+                end_date=end_token,
+                query_lifetime=query_lifetime,
+            )
+            creative_params = render_dynamic_values(creative_params)
+            start_date = creative_params.get("start_date")
+            end_date = creative_params.get("end_date")
+            material_types = [args.material_type or "VIDEO"]
+            if getattr(args, "include_image_material", False):
+                if "IMAGE" not in material_types:
+                    material_types.append("IMAGE")
+            payload = await fetch_all_advertiser_creative_reports(
+                build_client(args),
+                creative_params,
+                material_types=material_types,
+                advertiser_ids=advertiser_ids,
+                advertiser_keyword=args.advertiser_keyword,
+                only_active_rows=args.only_active,
+                only_spend_rows=args.only_spend,
+                max_retries=args.retries,
+            )
         else:
-            report_arguments["start_date"] = start_token or "${week_ago}"
-            report_arguments["end_date"] = end_token or "${today}"
-            report_arguments = render_dynamic_values(report_arguments)
-            start_date = report_arguments.get("start_date")
-            end_date = report_arguments.get("end_date")
+            report_arguments = build_basic_report_arguments(
+                data_level=args.data_level,
+                start_date=start_token,
+                end_date=end_token,
+                query_lifetime=query_lifetime,
+            )
+            if query_lifetime:
+                start_date = None
+                end_date = None
+            else:
+                report_arguments = render_dynamic_values(report_arguments)
+                start_date = report_arguments.get("start_date")
+                end_date = report_arguments.get("end_date")
 
-    advertiser_ids = None
-    if args.advertiser_id:
-        advertiser_ids = [
-            item.strip()
-            for item in args.advertiser_id.split(",")
-            if item.strip()
-        ]
+            payload = await fetch_all_advertiser_reports(
+                build_client(args),
+                report_arguments,
+                advertiser_ids=advertiser_ids,
+                advertiser_keyword=args.advertiser_keyword,
+                only_active_rows=args.only_active,
+                only_spend_rows=args.only_spend,
+                max_retries=args.retries,
+            )
 
-    payload = await fetch_all_advertiser_reports(
-        build_client(args),
-        report_arguments,
-        advertiser_ids=advertiser_ids,
-        advertiser_keyword=args.advertiser_keyword,
-        only_active_rows=args.only_active,
-        only_spend_rows=args.only_spend,
-        max_retries=args.retries,
-    )
+    level_tag = "material" if mode == "material" else args.data_level.lower()
     label = default_output_stem(
         preset=preset,
         start_date=str(start_date) if start_date else None,
         end_date=str(end_date) if end_date else None,
-        query_lifetime=query_lifetime or bool(
-            report_arguments.get("query_lifetime")
+        query_lifetime=query_lifetime
+        or bool(
+            (payload.get("report_arguments") or {}).get("query_lifetime")
+            or (payload.get("report_arguments") or {}).get("lifetime")
         ),
     )
+    label = f"{label}_{level_tag}"
     paths = save_rows(
         Path(args.output_dir),
         label,
@@ -819,6 +1250,7 @@ async def command_report_all(args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {
+                "mode": mode,
                 "advertiser_count": payload["advertiser_count"],
                 "row_count": payload["row_count"],
                 "error_count": payload["error_count"],
@@ -1022,6 +1454,24 @@ def create_parser() -> argparse.ArgumentParser:
             "AUCTION_AD",
             "AUCTION_ADVERTISER",
         ],
+        help="basic 模式下的数据粒度；广告级会带素材名与视频完播指标",
+    )
+    report_all_parser.add_argument(
+        "--mode",
+        default="basic",
+        choices=["basic", "material"],
+        help="basic=计划/广告组/广告报表；material=按视频素材汇总消耗",
+    )
+    report_all_parser.add_argument(
+        "--material-type",
+        default="VIDEO",
+        choices=["VIDEO", "IMAGE", "INSTANT_PAGE"],
+        help="material 模式下的素材类型，默认 VIDEO",
+    )
+    report_all_parser.add_argument(
+        "--include-image-material",
+        action="store_true",
+        help="material 模式下同时拉取 IMAGE 素材报表",
     )
     report_all_parser.add_argument(
         "--advertiser-id",

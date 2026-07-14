@@ -59,9 +59,15 @@ def get_metric(row: dict[str, Any], *keys: str) -> Any:
         nested = row.get("metrics")
         if isinstance(nested, dict) and key in nested:
             return nested[key]
+        info = row.get("info")
+        if isinstance(info, dict) and key in info:
+            return info[key]
         dotted = f"metrics.{key}"
         if dotted in row:
             return row[dotted]
+        dotted_info = f"info.{key}"
+        if dotted_info in row:
+            return row[dotted_info]
     return None
 
 

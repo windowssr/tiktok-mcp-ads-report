@@ -37,7 +37,8 @@ TikTok Marketing API / 广告账户数据
 | 工具 | 作用 |
 |------|------|
 | `auth_advertiser_get` | 列出当前授权下的全部广告账户 |
-| `report_integrated_get` | 同步综合报表（投流指标） |
+| `report_integrated_get` | 同步综合报表（计划/广告组/广告级投流指标） |
+| `creative_report_get`（经 `tool_execute`） | 按视频素材汇总消耗 |
 | `report-all` 命令 | 自动遍历全部账户并合并结果 |
 
 默认报表字段包括：
@@ -46,10 +47,18 @@ TikTok Marketing API / 广告账户数据
 - 转化：`conversion` / `cost_per_conversion` / `conversion_rate`
 - ROAS 相关：`complete_payment_roas` / `total_active_pay_roas` / `total_purchase_value` / `value_per_complete_payment` / `total_complete_payment_rate`
 
+广告级（`--data-level AUCTION_AD`）额外包含：
+
+- 名称：`ad_name` / `adgroup_name` / `campaign_name`
+- 视频：`video_play_actions` / `video_watched_2s` / `video_watched_6s` / `average_video_play` / `video_views_p25`~`p100`
+
+素材级（`--mode material`）按 `material_id` / `material_name` 汇总消耗，适合看「哪个视频素材在烧钱」。
+
 说明：
 
-- 行数 =「有投放数据的计划数」，不是账户数。例如 41 个账户里可能只有部分账户在日期范围内有数据。
+- 计划级行数 =「有投放数据的计划数」，不是账户数。例如 41 个账户里可能只有部分账户在日期范围内有数据。
 - 部分小程序 IAA 账户可能没有 Complete Payment 回传，此时 ROAS 字段会是 `0.00`，但消耗、点击等仍可用。
+- 广告级与素材级是投流看素材消耗的两条常用路径：广告级看「这条广告」，素材级看「这个视频素材」（同一素材可挂多条广告）。
 
 ---
 
@@ -207,24 +216,30 @@ python fetch_ads.py --proxy http://127.0.0.1:7890
 - 按时间拉取：今天 / 昨天 / 近7/14/30天 / 本月 / 自定义日期
 - 全量 lifetime 拉取
 - 按账户关键字或指定账户 ID
-- 选择粒度：计划 / 广告组 / 广告 / 账户
+- 选择粒度：计划 / 广告组 / **广告** / **素材消耗** / 账户（默认推荐素材）
 - 导出 **Excel / CSV / JSON**（Excel 含：总览、明细、账户汇总、错误）
 - 只保留有消耗的行、失败自动重试、打开输出目录、改代理、重新授权
 
 命令行等价示例：
 
 ```powershell
-# 近 7 天，全账户，导出 xlsx+csv+json
-& $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --only-spend --format xlsx --format csv --format json
+# 近 7 天，全账户，计划级
+& $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --only-spend --format xlsx --format csv
+
+# 广告级（单条广告消耗 + 视频完播）
+& $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --data-level AUCTION_AD --only-spend --format xlsx
+
+# 素材消耗（按视频素材汇总，投流看素材必用）
+& $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --mode material --only-spend --format xlsx --format csv
 
 # 自定义日期
-& $TK report-all --proxy http://127.0.0.1:7890 --start-date 2026-07-01 --end-date 2026-07-13 --format xlsx
+& $TK report-all --proxy http://127.0.0.1:7890 --start-date 2026-07-01 --end-date 2026-07-13 --mode material --format xlsx
 
 # lifetime 全量
 & $TK report-all --proxy http://127.0.0.1:7890 --lifetime --format xlsx
 
 # 只拉某个账户
-& $TK report-all --proxy http://127.0.0.1:7890 --preset yesterday --advertiser-keyword 何祥伟 --format xlsx
+& $TK report-all --proxy http://127.0.0.1:7890 --preset yesterday --advertiser-keyword 何祥伟 --mode material --format xlsx
 ```
 
 ### 5. 也可用参数模板拉取

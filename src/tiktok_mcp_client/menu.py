@@ -8,18 +8,19 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 from tiktok_mcp_client.cli import (
     DEFAULT_CALLBACK_PORT,
-    DEFAULT_ROAS_METRICS,
     DEFAULT_SERVER_URL,
     DEFAULT_STATE_DIR,
     TikTokMcpClient,
+    build_basic_report_arguments,
     build_client,
+    build_creative_report_params,
     call_once,
     command_auth,
     command_logout,
+    fetch_all_advertiser_creative_reports,
     fetch_all_advertiser_reports,
     parse_advertisers,
     render_dynamic_values,
@@ -121,23 +122,27 @@ def choose_preset() -> tuple[str, str | None, str | None, bool]:
     return preset, start_token, end_token, lifetime
 
 
-def choose_data_level() -> str:
+def choose_report_kind() -> tuple[str, str]:
+    """Return (mode, data_level). mode is basic|material."""
     print(
         """
-数据粒度:
+报表类型（投流常用）:
   1) 计划 Campaign
   2) 广告组 Ad Group
-  3) 广告 Ad
-  4) 账户 Advertiser
+  3) 广告 Ad（广告名 + 视频完播等，看单条广告消耗）
+  4) 素材 Material（按视频素材汇总消耗，看素材消耗）
+  5) 账户 Advertiser
 """.rstrip()
     )
-    choice = ask("请选择", "1")
-    return {
-        "1": "AUCTION_CAMPAIGN",
-        "2": "AUCTION_ADGROUP",
-        "3": "AUCTION_AD",
-        "4": "AUCTION_ADVERTISER",
-    }.get(choice, "AUCTION_CAMPAIGN")
+    choice = ask("请选择", "4")
+    mapping = {
+        "1": ("basic", "AUCTION_CAMPAIGN"),
+        "2": ("basic", "AUCTION_ADGROUP"),
+        "3": ("basic", "AUCTION_AD"),
+        "4": ("material", "AUCTION_AD"),
+        "5": ("basic", "AUCTION_ADVERTISER"),
+    }
+    return mapping.get(choice, ("material", "AUCTION_AD"))
 
 
 def choose_formats() -> list[str]:
@@ -178,6 +183,7 @@ async def run_fetch(
     start_date: str | None,
     end_date: str | None,
     query_lifetime: bool,
+    mode: str,
     data_level: str,
     formats: list[str],
     advertiser_ids: list[str] | None,
@@ -186,46 +192,84 @@ async def run_fetch(
     only_spend: bool,
     output_dir: Path,
 ) -> list[Path]:
-    report_arguments: dict[str, Any] = {
-        "report_type": "BASIC",
-        "data_level": data_level,
-        "dimensions": ["campaign_id"],
-        "metrics": DEFAULT_ROAS_METRICS,
-        "page_size": 1000,
-        "order_field": "spend",
-        "order_type": "DESC",
-    }
-    if query_lifetime:
-        report_arguments["query_lifetime"] = True
-        resolved_start = None
-        resolved_end = None
+    if mode == "material":
+        creative_params = build_creative_report_params(
+            material_type="VIDEO",
+            start_date=start_date,
+            end_date=end_date,
+            query_lifetime=query_lifetime,
+        )
+        if query_lifetime:
+            resolved_start = None
+            resolved_end = None
+        else:
+            creative_params = render_dynamic_values(creative_params)
+            resolved_start = creative_params.get("start_date")
+            resolved_end = creative_params.get("end_date")
+
+        print("\n开始拉取素材消耗...")
+        print(
+            f"  时间: "
+            f"{'lifetime' if query_lifetime else f'{resolved_start} ~ {resolved_end}'}"
+        )
+        print("  粒度: 素材 Material (creative_report_get / VIDEO)")
+        print(f"  格式: {', '.join(formats)}")
+
+        payload = await fetch_all_advertiser_creative_reports(
+            build_client(ns),
+            creative_params,
+            material_types=["VIDEO"],
+            advertiser_ids=advertiser_ids,
+            advertiser_keyword=advertiser_keyword,
+            only_active_rows=only_active,
+            only_spend_rows=only_spend,
+            max_retries=2,
+        )
+        level_tag = "material"
     else:
-        report_arguments["start_date"] = start_date or "${week_ago}"
-        report_arguments["end_date"] = end_date or "${today}"
-        report_arguments = render_dynamic_values(report_arguments)
-        resolved_start = report_arguments.get("start_date")
-        resolved_end = report_arguments.get("end_date")
+        report_arguments = build_basic_report_arguments(
+            data_level=data_level,
+            start_date=start_date,
+            end_date=end_date,
+            query_lifetime=query_lifetime,
+        )
+        if query_lifetime:
+            resolved_start = None
+            resolved_end = None
+        else:
+            report_arguments = render_dynamic_values(report_arguments)
+            resolved_start = report_arguments.get("start_date")
+            resolved_end = report_arguments.get("end_date")
 
-    print("\n开始拉取...")
-    print(f"  时间: {'lifetime' if query_lifetime else f'{resolved_start} ~ {resolved_end}'}")
-    print(f"  粒度: {data_level}")
-    print(f"  格式: {', '.join(formats)}")
+        print("\n开始拉取...")
+        print(
+            f"  时间: "
+            f"{'lifetime' if query_lifetime else f'{resolved_start} ~ {resolved_end}'}"
+        )
+        print(
+            f"  粒度: {data_level} / dimensions="
+            f"{report_arguments.get('dimensions')}"
+        )
+        print(f"  格式: {', '.join(formats)}")
 
-    payload = await fetch_all_advertiser_reports(
-        build_client(ns),
-        report_arguments,
-        advertiser_ids=advertiser_ids,
-        advertiser_keyword=advertiser_keyword,
-        only_active_rows=only_active,
-        only_spend_rows=only_spend,
-        max_retries=2,
-    )
+        payload = await fetch_all_advertiser_reports(
+            build_client(ns),
+            report_arguments,
+            advertiser_ids=advertiser_ids,
+            advertiser_keyword=advertiser_keyword,
+            only_active_rows=only_active,
+            only_spend_rows=only_spend,
+            max_retries=2,
+        )
+        level_tag = data_level.lower()
+
     label = default_output_stem(
         preset=preset,
         start_date=str(resolved_start) if resolved_start else None,
         end_date=str(resolved_end) if resolved_end else None,
         query_lifetime=query_lifetime,
     )
+    label = f"{label}_{level_tag}"
     paths = save_rows(output_dir, label, payload, payload["rows"], formats)
     totals = (payload.get("summary") or {}).get("totals") or {}
     print("\n拉取完成")
@@ -284,7 +328,7 @@ async def interactive_loop(ns: SimpleNamespace, output_dir: Path) -> int:
                     )
                 else:
                     preset, start_date, end_date, lifetime = choose_preset()
-                data_level = choose_data_level()
+                mode, data_level = choose_report_kind()
                 formats = choose_formats()
                 only_spend = ask_yes_no("只保留有消耗的行？", True)
                 only_active = False if only_spend else ask_yes_no(
@@ -307,6 +351,7 @@ async def interactive_loop(ns: SimpleNamespace, output_dir: Path) -> int:
                     start_date=start_date,
                     end_date=end_date,
                     query_lifetime=lifetime,
+                    mode=mode,
                     data_level=data_level,
                     formats=formats,
                     advertiser_ids=advertiser_ids,
@@ -396,6 +441,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--only-spend", action="store_true")
     parser.add_argument("--only-active", action="store_true")
+    parser.add_argument(
+        "--mode",
+        default="material",
+        choices=["basic", "material"],
+        help="once 模式默认拉素材消耗；basic 配合 --data-level",
+    )
+    parser.add_argument(
+        "--data-level",
+        default="AUCTION_AD",
+        choices=[
+            "AUCTION_CAMPAIGN",
+            "AUCTION_ADGROUP",
+            "AUCTION_AD",
+            "AUCTION_ADVERTISER",
+        ],
+    )
     return parser
 
 
@@ -427,7 +488,8 @@ def main() -> None:
                 start_date=start_date,
                 end_date=end_date,
                 query_lifetime=lifetime,
-                data_level="AUCTION_CAMPAIGN",
+                mode=args.mode,
+                data_level=args.data_level,
                 formats=formats,
                 advertiser_ids=None,
                 advertiser_keyword=None,
