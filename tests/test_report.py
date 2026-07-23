@@ -19,6 +19,16 @@ def test_resolve_date_preset_custom():
     assert lifetime is False
 
 
+def test_resolve_date_preset_single_day():
+    start, end, lifetime = resolve_date_preset("day", start_date="2026-07-22")
+    assert start == end == "2026-07-22"
+    assert lifetime is False
+    start, end, lifetime = resolve_date_preset(
+        "custom", start_date="2026-07-22"
+    )
+    assert start == end == "2026-07-22"
+
+
 def test_build_summary_and_filter():
     rows = [
         {

@@ -43,9 +43,12 @@ TikTok Marketing API / 广告账户数据
 
 默认报表字段包括：
 
-- 基础：`spend` / `impressions` / `clicks` / `ctr` / `cpc` / `cpm`
-- 转化：`conversion` / `cost_per_conversion` / `conversion_rate`
-- ROAS 相关：`complete_payment_roas` / `total_active_pay_roas` / `total_purchase_value` / `value_per_complete_payment` / `total_complete_payment_rate`
+- 账户：`advertiser_name` / `advertiser_id`（客户端自动附加）
+- 消耗：`spend` / `cash_spend`（现金） / `voucher_spend`（赠款）
+- 效果：`cpc` / `cpm` / `impressions` / `conversion` / `cost_per_conversion`
+- 互动：`engagements`（点击数全部） / `engagement_rate`
+- Native Growth 广告收益金额：`native_growth_ad_revenue_value_d0`~`d6` / `d13` / `d20` / `d27` / `d29` / `d31`
+- Native Growth 广告收益 ROAS：`native_growth_ad_revenue_roas_d0`~`d6` / `d13` / `d20` / `d27` / `d29` / `d31`
 
 广告级（`--data-level AUCTION_AD`）额外包含：
 
@@ -57,7 +60,7 @@ TikTok Marketing API / 广告账户数据
 说明：
 
 - 计划级行数 =「有投放数据的计划数」，不是账户数。例如 41 个账户里可能只有部分账户在日期范围内有数据。
-- 部分小程序 IAA 账户可能没有 Complete Payment 回传，此时 ROAS 字段会是 `0.00`，但消耗、点击等仍可用。
+- Native Growth 指标依赖 App 侧广告变现回传；未开通或未回传时字段可能为 `0.00`。
 - 广告级与素材级是投流看素材消耗的两条常用路径：广告级看「这条广告」，素材级看「这个视频素材」（同一素材可挂多条广告）。
 
 ---
@@ -213,7 +216,7 @@ python fetch_ads.py --proxy http://127.0.0.1:7890
 
 菜单能力：
 
-- 按时间拉取：今天 / 昨天 / 近7/14/30天 / 本月 / 自定义日期
+- 按时间拉取：今天 / 昨天 / **指定单日** / 近7/14/30天 / 本月 / 自定义日期
 - 全量 lifetime 拉取
 - 按账户关键字或指定账户 ID
 - 选择粒度：计划 / 广告组 / **广告** / **素材消耗** / 账户（默认推荐素材）
@@ -223,6 +226,13 @@ python fetch_ads.py --proxy http://127.0.0.1:7890
 命令行等价示例：
 
 ```powershell
+# 单日（推荐）：起止都是同一天
+& $TK report-all --proxy http://127.0.0.1:7890 --date 2026-07-22 --only-spend --format xlsx --format csv
+
+# 昨天 / 今天
+& $TK report-all --proxy http://127.0.0.1:7890 --preset yesterday --only-spend --format xlsx
+& $TK report-all --proxy http://127.0.0.1:7890 --preset today --only-spend --format xlsx
+
 # 近 7 天，全账户，计划级
 & $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --only-spend --format xlsx --format csv
 
@@ -232,7 +242,7 @@ python fetch_ads.py --proxy http://127.0.0.1:7890
 # 素材消耗（按视频素材汇总，投流看素材必用）
 & $TK report-all --proxy http://127.0.0.1:7890 --preset last_7_days --mode material --only-spend --format xlsx --format csv
 
-# 自定义日期
+# 自定义区间
 & $TK report-all --proxy http://127.0.0.1:7890 --start-date 2026-07-01 --end-date 2026-07-13 --mode material --format xlsx
 
 # lifetime 全量

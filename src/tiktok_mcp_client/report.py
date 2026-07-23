@@ -24,7 +24,15 @@ def resolve_date_preset(
 ) -> tuple[str | None, str | None, bool]:
     """Return (start_date, end_date, query_lifetime)."""
     key = preset.strip().lower().replace("-", "_").replace(" ", "_")
+    if key in {"day", "single_day", "one_day", "date"}:
+        day = start_date or end_date
+        if not day:
+            raise ValueError("单日查询需要提供日期，例如 --date 2026-07-22")
+        return day, day, False
     if key in {"custom", "range"}:
+        if start_date and not end_date:
+            # 只给开始日时按单日处理
+            return start_date, start_date, False
         if not start_date or not end_date:
             raise ValueError("自定义时间范围需要同时提供 start_date 和 end_date")
         return start_date, end_date, False
@@ -33,7 +41,7 @@ def resolve_date_preset(
     if key not in DATE_PRESETS:
         raise ValueError(
             f"未知时间预设: {preset}。"
-            f"可选: {', '.join(DATE_PRESETS)} / custom / lifetime"
+            f"可选: {', '.join(DATE_PRESETS)} / day / custom / lifetime"
         )
     pair = DATE_PRESETS[key]
     assert pair is not None
@@ -75,9 +83,13 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     totals = {
         "row_count": len(rows),
         "spend": 0.0,
+        "cash_spend": 0.0,
+        "voucher_spend": 0.0,
         "impressions": 0.0,
         "clicks": 0.0,
+        "engagements": 0.0,
         "conversion": 0.0,
+        "native_growth_ad_revenue_value_d0": 0.0,
         "purchase_value": 0.0,
         "rows_with_spend": 0,
         "rows_with_conversion": 0,
@@ -88,29 +100,44 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "advertiser_name": "",
             "row_count": 0,
             "spend": 0.0,
+            "cash_spend": 0.0,
+            "voucher_spend": 0.0,
             "impressions": 0.0,
             "clicks": 0.0,
+            "engagements": 0.0,
             "conversion": 0.0,
+            "native_growth_ad_revenue_value_d0": 0.0,
             "purchase_value": 0.0,
         }
     )
 
     for row in rows:
         spend = to_number(get_metric(row, "spend"))
+        cash_spend = to_number(get_metric(row, "cash_spend"))
+        voucher_spend = to_number(get_metric(row, "voucher_spend"))
         impressions = to_number(get_metric(row, "impressions"))
-        clicks = to_number(get_metric(row, "clicks"))
+        engagements = to_number(get_metric(row, "engagements", "clicks"))
+        clicks = to_number(get_metric(row, "clicks", "engagements"))
         conversion = to_number(get_metric(row, "conversion"))
+        native_d0 = to_number(
+            get_metric(row, "native_growth_ad_revenue_value_d0")
+        )
         purchase = to_number(
             get_metric(
                 row,
+                "native_growth_ad_revenue_value_d0",
                 "total_purchase_value",
                 "value_per_complete_payment",
             )
         )
         totals["spend"] += spend
+        totals["cash_spend"] += cash_spend
+        totals["voucher_spend"] += voucher_spend
         totals["impressions"] += impressions
         totals["clicks"] += clicks
+        totals["engagements"] += engagements
         totals["conversion"] += conversion
+        totals["native_growth_ad_revenue_value_d0"] += native_d0
         totals["purchase_value"] += purchase
         if spend > 0:
             totals["rows_with_spend"] += 1
@@ -124,20 +151,23 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         bucket["advertiser_name"] = advertiser_name
         bucket["row_count"] += 1
         bucket["spend"] += spend
+        bucket["cash_spend"] += cash_spend
+        bucket["voucher_spend"] += voucher_spend
         bucket["impressions"] += impressions
         bucket["clicks"] += clicks
+        bucket["engagements"] += engagements
         bucket["conversion"] += conversion
+        bucket["native_growth_ad_revenue_value_d0"] += native_d0
         bucket["purchase_value"] += purchase
 
+    click_base = totals["engagements"] or totals["clicks"]
     totals["ctr"] = (
-        round(totals["clicks"] / totals["impressions"] * 100, 4)
+        round(click_base / totals["impressions"] * 100, 4)
         if totals["impressions"]
         else 0.0
     )
     totals["cpc"] = (
-        round(totals["spend"] / totals["clicks"], 4)
-        if totals["clicks"]
-        else 0.0
+        round(totals["spend"] / click_base, 4) if click_base else 0.0
     )
     totals["cpm"] = (
         round(totals["spend"] / totals["impressions"] * 1000, 4)
@@ -154,27 +184,51 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if totals["spend"] and totals["purchase_value"]
         else 0.0
     )
-    totals["spend"] = round(totals["spend"], 2)
-    totals["purchase_value"] = round(totals["purchase_value"], 2)
+    totals["native_growth_ad_revenue_roas_d0"] = (
+        round(
+            totals["native_growth_ad_revenue_value_d0"] / totals["spend"], 4
+        )
+        if totals["spend"] and totals["native_growth_ad_revenue_value_d0"]
+        else 0.0
+    )
+    for key in (
+        "spend",
+        "cash_spend",
+        "voucher_spend",
+        "purchase_value",
+        "native_growth_ad_revenue_value_d0",
+    ):
+        totals[key] = round(totals[key], 2)
 
     advertiser_rows = []
     for item in by_advertiser.values():
         item["spend"] = round(item["spend"], 2)
+        item["cash_spend"] = round(item["cash_spend"], 2)
+        item["voucher_spend"] = round(item["voucher_spend"], 2)
         item["purchase_value"] = round(item["purchase_value"], 2)
+        item["native_growth_ad_revenue_value_d0"] = round(
+            item["native_growth_ad_revenue_value_d0"], 2
+        )
+        click_base = item["engagements"] or item["clicks"]
         item["ctr"] = (
-            round(item["clicks"] / item["impressions"] * 100, 4)
+            round(click_base / item["impressions"] * 100, 4)
             if item["impressions"]
             else 0.0
         )
         item["cpc"] = (
-            round(item["spend"] / item["clicks"], 4)
-            if item["clicks"]
-            else 0.0
+            round(item["spend"] / click_base, 4) if click_base else 0.0
         )
         item["cpa"] = (
             round(item["spend"] / item["conversion"], 4)
             if item["conversion"]
             else None
+        )
+        item["native_growth_ad_revenue_roas_d0"] = (
+            round(
+                item["native_growth_ad_revenue_value_d0"] / item["spend"], 4
+            )
+            if item["spend"] and item["native_growth_ad_revenue_value_d0"]
+            else 0.0
         )
         advertiser_rows.append(item)
     advertiser_rows.sort(key=lambda item: item["spend"], reverse=True)
@@ -194,7 +248,7 @@ def filter_rows_with_activity(
     for row in rows:
         spend = to_number(get_metric(row, "spend"))
         impressions = to_number(get_metric(row, "impressions"))
-        clicks = to_number(get_metric(row, "clicks"))
+        clicks = to_number(get_metric(row, "clicks", "engagements"))
         conversion = to_number(get_metric(row, "conversion"))
         if only_spend:
             if spend > 0:
@@ -256,9 +310,14 @@ def write_excel(
         "advertiser_name",
         "row_count",
         "spend",
+        "cash_spend",
+        "voucher_spend",
         "impressions",
+        "engagements",
         "clicks",
         "conversion",
+        "native_growth_ad_revenue_value_d0",
+        "native_growth_ad_revenue_roas_d0",
         "purchase_value",
         "ctr",
         "cpc",

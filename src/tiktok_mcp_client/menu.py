@@ -94,26 +94,31 @@ def choose_preset() -> tuple[str, str | None, str | None, bool]:
 时间范围:
   1) 今天
   2) 昨天
-  3) 近 7 天
-  4) 近 14 天
-  5) 近 30 天
-  6) 本月至今
-  7) 自定义起止日期
-  8) 全量 lifetime（不限日期）
+  3) 指定单日（输入 YYYY-MM-DD）
+  4) 近 7 天
+  5) 近 14 天
+  6) 近 30 天
+  7) 本月至今
+  8) 自定义起止日期
+  9) 全量 lifetime（不限日期）
 """.rstrip()
     )
-    choice = ask("请选择", "3")
+    choice = ask("请选择", "2")
     mapping = {
         "1": "today",
         "2": "yesterday",
-        "3": "last_7_days",
-        "4": "last_14_days",
-        "5": "last_30_days",
-        "6": "this_month",
-        "7": "custom",
-        "8": "lifetime",
+        "3": "day",
+        "4": "last_7_days",
+        "5": "last_14_days",
+        "6": "last_30_days",
+        "7": "this_month",
+        "8": "custom",
+        "9": "lifetime",
     }
-    preset = mapping.get(choice, "last_7_days")
+    preset = mapping.get(choice, "yesterday")
+    if preset == "day":
+        day = ask("单日日期 YYYY-MM-DD")
+        return "day", day, day, False
     if preset == "custom":
         start_date = ask("开始日期 YYYY-MM-DD")
         end_date = ask("结束日期 YYYY-MM-DD")
@@ -129,12 +134,12 @@ def choose_report_kind() -> tuple[str, str]:
 报表类型（投流常用）:
   1) 计划 Campaign
   2) 广告组 Ad Group
-  3) 广告 Ad（广告名 + 视频完播等，看单条广告消耗）
-  4) 素材 Material（按视频素材汇总消耗，看素材消耗）
+  3) 有消耗的广告/素材 Ad（推荐：一条广告≈一条素材，含现金/赠款/Native Growth）
+  4) 素材 Material ID 汇总（按视频素材汇总；不含现金/赠款/Native Growth）
   5) 账户 Advertiser
 """.rstrip()
     )
-    choice = ask("请选择", "4")
+    choice = ask("请选择", "3")
     mapping = {
         "1": ("basic", "AUCTION_CAMPAIGN"),
         "2": ("basic", "AUCTION_ADGROUP"),
@@ -142,7 +147,7 @@ def choose_report_kind() -> tuple[str, str]:
         "4": ("material", "AUCTION_AD"),
         "5": ("basic", "AUCTION_ADVERTISER"),
     }
-    return mapping.get(choice, ("material", "AUCTION_AD"))
+    return mapping.get(choice, ("basic", "AUCTION_AD"))
 
 
 def choose_formats() -> list[str]:
@@ -423,6 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "today",
             "yesterday",
+            "day",
             "last_7_days",
             "last_14_days",
             "last_30_days",
@@ -431,8 +437,12 @@ def build_parser() -> argparse.ArgumentParser:
         ],
         help="非交互：直接按预设拉取一次并退出",
     )
-    parser.add_argument("--start-date", help="配合 --once custom 使用")
-    parser.add_argument("--end-date", help="配合 --once custom 使用")
+    parser.add_argument(
+        "--date",
+        help="单日日期 YYYY-MM-DD；配合 --once day，或单独使用",
+    )
+    parser.add_argument("--start-date", help="开始日期 YYYY-MM-DD")
+    parser.add_argument("--end-date", help="结束日期 YYYY-MM-DD")
     parser.add_argument(
         "--format",
         action="append",
@@ -443,9 +453,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--only-active", action="store_true")
     parser.add_argument(
         "--mode",
-        default="material",
+        default="basic",
         choices=["basic", "material"],
-        help="once 模式默认拉素材消耗；basic 配合 --data-level",
+        help="once 默认 basic+广告级；material=按 material_id 汇总（指标较少）",
     )
     parser.add_argument(
         "--data-level",
@@ -476,10 +486,18 @@ def main() -> None:
     async def _run() -> int:
         if args.once:
             preset = args.once
+            start_arg = args.start_date
+            end_arg = args.end_date
+            if getattr(args, "date", None):
+                preset = "day"
+                start_arg = args.date
+                end_arg = args.date
+            elif preset == "day" and not start_arg:
+                raise SystemExit("单日拉取请提供 --date YYYY-MM-DD")
             start_date, end_date, lifetime = resolve_date_preset(
                 preset,
-                start_date=args.start_date,
-                end_date=args.end_date,
+                start_date=start_arg,
+                end_date=end_arg,
             )
             formats = args.format or ["xlsx", "csv", "json"]
             await run_fetch(

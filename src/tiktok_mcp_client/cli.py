@@ -295,21 +295,43 @@ DATA_LEVEL_DIMENSIONS: dict[str, list[str]] = {
     "AUCTION_ADVERTISER": ["advertiser_id"],
 }
 
+# 投流默认指标：消耗拆分 + 互动 + Native Growth D0~D31 收益/ROAS
+# advertiser_name / advertiser_id 由客户端按账户附加，无需放进 metrics
 CORE_PERF_METRICS = [
     "spend",
-    "impressions",
-    "clicks",
-    "ctr",
+    "cash_spend",
+    "voucher_spend",
     "cpc",
     "cpm",
+    "impressions",
     "conversion",
     "cost_per_conversion",
-    "conversion_rate",
-    "complete_payment_roas",
-    "value_per_complete_payment",
-    "total_complete_payment_rate",
-    "total_purchase_value",
-    "total_active_pay_roas",
+    "engagements",
+    "engagement_rate",
+    "native_growth_ad_revenue_value_d0",
+    "native_growth_ad_revenue_value_d1",
+    "native_growth_ad_revenue_value_d2",
+    "native_growth_ad_revenue_value_d3",
+    "native_growth_ad_revenue_value_d4",
+    "native_growth_ad_revenue_value_d5",
+    "native_growth_ad_revenue_value_d6",
+    "native_growth_ad_revenue_value_d13",
+    "native_growth_ad_revenue_value_d20",
+    "native_growth_ad_revenue_value_d27",
+    "native_growth_ad_revenue_value_d29",
+    "native_growth_ad_revenue_value_d31",
+    "native_growth_ad_revenue_roas_d0",
+    "native_growth_ad_revenue_roas_d1",
+    "native_growth_ad_revenue_roas_d2",
+    "native_growth_ad_revenue_roas_d3",
+    "native_growth_ad_revenue_roas_d4",
+    "native_growth_ad_revenue_roas_d5",
+    "native_growth_ad_revenue_roas_d6",
+    "native_growth_ad_revenue_roas_d13",
+    "native_growth_ad_revenue_roas_d20",
+    "native_growth_ad_revenue_roas_d27",
+    "native_growth_ad_revenue_roas_d29",
+    "native_growth_ad_revenue_roas_d31",
 ]
 
 VIDEO_PERF_METRICS = [
@@ -353,6 +375,7 @@ CREATIVE_INFO_FIELDS = [
     "tiktok_item_ids",
 ]
 
+# creative_report_get 仅支持以下指标；现金/赠款/Native Growth 需走广告级报表
 CREATIVE_METRICS_FIELDS = [
     "spend",
     "impressions",
@@ -1159,6 +1182,13 @@ async def command_report_all(args: argparse.Namespace) -> int:
     else:
         if args.lifetime:
             preset = "lifetime"
+        elif getattr(args, "date", None):
+            preset = "day"
+            args.start_date = args.date
+            args.end_date = args.date
+        elif args.start_date and not args.end_date:
+            preset = "day"
+            args.end_date = args.start_date
         elif args.start_date and args.end_date:
             preset = "custom"
         else:
@@ -1426,19 +1456,24 @@ def create_parser() -> argparse.ArgumentParser:
         "--preset",
         default="last_7_days",
         help=(
-            "时间预设: today/yesterday/last_7_days/last_14_days/"
+            "时间预设: today/yesterday/day/last_7_days/last_14_days/"
             "last_30_days/this_month/lifetime/custom"
         ),
     )
     report_all_parser.add_argument(
+        "--date",
+        default=None,
+        help="单日日期 YYYY-MM-DD（等价于 start_date=end_date=该日）",
+    )
+    report_all_parser.add_argument(
         "--start-date",
         default=None,
-        help="开始日期 YYYY-MM-DD；preset=custom 时必填，也可写 ${week_ago}",
+        help="开始日期 YYYY-MM-DD；只填此项时按单日拉取",
     )
     report_all_parser.add_argument(
         "--end-date",
         default=None,
-        help="结束日期 YYYY-MM-DD；preset=custom 时必填",
+        help="结束日期 YYYY-MM-DD；与 --start-date 组成区间",
     )
     report_all_parser.add_argument(
         "--lifetime",
@@ -1447,14 +1482,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
     report_all_parser.add_argument(
         "--data-level",
-        default="AUCTION_CAMPAIGN",
+        default="AUCTION_AD",
         choices=[
             "AUCTION_CAMPAIGN",
             "AUCTION_ADGROUP",
             "AUCTION_AD",
             "AUCTION_ADVERTISER",
         ],
-        help="basic 模式下的数据粒度；广告级会带素材名与视频完播指标",
+        help="basic 模式下的数据粒度；默认广告级（有消耗素材投放单元）",
     )
     report_all_parser.add_argument(
         "--mode",
